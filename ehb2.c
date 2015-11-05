@@ -1,14 +1,14 @@
 /*************************************************************************
 
-   Program:    ehb2
-   File:       ehb2.c
+   Program:    ehb2a
+   File:       ehb2a.c
    
-   Version:    V1.0
-   Date:       05.02.03
+   Version:    V1.2
+   Date:       23.09.05
    Function:   Calculate total energy between two H-bonded residues
                identified by HBPlus
    
-   Copyright:  (c) University of Reading / Dr. Andrew C. R. Martin 2003
+   Copyright:  (c) University of Reading / Dr. Andrew C. R. Martin 2003-5
    Author:     Dr. Andrew C. R. Martin
    Address:    School of Animal and Microbial Sciences,
                The University of Reading,
@@ -48,6 +48,10 @@
 
    Revision History:
    =================
+   V1.0  05.02.03   Original              By: ACRM
+   V1.1  07.03.03   Added control file    By: ALC
+   V1.2  23.09.05   Fixed various bugs and takes command line parameters
+                    for potential type    By: ACRM
 
 *************************************************************************/
 /* Includes
@@ -66,6 +70,7 @@
 #define MAXHBOND 10000
 #define MAXBUFF  256
 #define NSKIP    8  /* Number of header lines at start of HBPlus output */
+#define CUTSQ    3.5
 
 typedef struct
 {
@@ -87,20 +92,22 @@ typedef struct
 /************************************************************************/
 /* Globals
 */
+BOOL gRelax = FALSE;
+BOOL gHBOnly = FALSE;
 
 /************************************************************************/
 /* Prototypes
 */
-BOOL ParseCmdLine(int argc, char **argv, char *PDBFile, char *HBPlusFile,
-                  BOOL *relax, BOOL *all);
-BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds, int i, BOOL relax);
+BOOL ParseCmdLine(int argc, char **argv, char *PDBFile, char *HBPlusFile);
+BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds, int i);
 void Usage(void);
 int main(int argc, char **argv);
 int ReadHBonds(char *filename, HBONDS *HBonds);
 void FixHydrogenAtomNames(PDB *pdb);
 PDB *CopyAndFixResidue(PDB *pdb, char chain);
 REAL ParseECalcOutput(char *EnergyFile);
-
+PDB *FixResidue(PDB *res);
+PDB *CopyResidue(PDB *pdb, char chain);
 
 /************************************************************************/
 /*>int main(int argc, char **argv)
@@ -115,35 +122,24 @@ int main(int argc, char **argv)
            HBPlusFile[MAXBUFF];
    HBONDS  HBonds[MAXHBOND];
    int     NHBonds, i;
-   BOOL    relax,
-           all;
    
-   
-   if(ParseCmdLine(argc, argv, PDBFile, HBPlusFile, &relax, &all))
+   if(ParseCmdLine(argc, argv, PDBFile, HBPlusFile))
    {
       if((NHBonds = ReadHBonds(HBPlusFile, HBonds))==0)
          return(1);
       
       for(i=0; i<NHBonds; i++)
       {
-         if(all)
+         /* If this is a sidechain-sidechain HBonds and doesn't involve
+            the OXT atoms (a bug in HBPlus...), then calculate the 
+            energy
+         */
+         if(!strncmp(HBonds[i].type, "SS", 2) &&
+            strncmp(HBonds[i].AtomD, "OXT", 3) &&
+            strncmp(HBonds[i].AtomA, "OXT", 3))
          {
-            if(!CalcEnergy(PDBFile, HBonds, i, relax))
+            if(!CalcEnergy(PDBFile, HBonds, i))
                return(1);
-         }
-         else
-         {
-            /* If this is a sidechain-sidechain HBonds and doesn't involve
-               the OXT atoms (a bug in HBPlus...), then calculate the 
-               energy
-            */
-            if(!strncmp(HBonds[i].type, "SS", 2) &&
-               strncmp(HBonds[i].AtomD, "OXT", 3) &&
-               strncmp(HBonds[i].AtomA, "OXT", 3))
-            {
-               if(!CalcEnergy(PDBFile, HBonds, i, relax))
-                  return(1);
-            }
          }
       }
    }
@@ -161,46 +157,44 @@ int main(int argc, char **argv)
    Print Usage message 
 
    06.02.03 Original   By: ACRM
+   23.09.05 Updated for V1.2
 */
 void Usage(void)
 {
-   fprintf(stderr,"\nehb2 V1.0 (c) 2003, Dr. Andrew C.R. Martin, The \
+   fprintf(stderr,"\nehb2 V1.2 (c) 2003-5, Dr. Andrew C.R. Martin, The \
 University of Reading\n");
-
-   fprintf(stderr,"\nUsage: ehb2 pdhfile hbplusfile\n");
+   fprintf(stderr, "and Dr. Alison L. Cuff\n");
+   
+   fprintf(stderr,"\nUsage: ehb2a [-r][-o] pdhfile hbplusfile\n");
+   fprintf(stderr,"\n       -r  Use the RELAX option in ecalc\n");
+   fprintf(stderr,"       -o  Calculate the hbond energy only (overrides -r)\n");
 
    fprintf(stderr,"\n       pdhfile    - PDB file with hydrogens output \
 from HBPlus (xxxx.h)\n");
    fprintf(stderr,"       hbplusfile - the main results file from HBPlus \
 (xxxx.hb2)\n");
 
-   fprintf(stderr,"\nehb2 calculates the total energy for a pair of amino \
+   fprintf(stderr,"\nehb2a calculates the total energy for a pair of amino \
 acids identified\n");
    fprintf(stderr,"as being in a sidechain-sidechain hydrogen bond by \
 HBPlus. HBPlus\n");
    fprintf(stderr,"should be run with the -o flag in order to generate a \
 PDB file \n");
-   fprintf(stderr,"containing hydrogens. This is used as input to ehb2 \
+   fprintf(stderr,"containing hydrogens. This is used as input to ehb2a \
 together with the\n");
-   fprintf(stderr,"main HBPlus output file.\n\n");
+   fprintf(stderr,"main HBPlus output file\n\n");
 }
 
 /************************************************************************/
 /*>BOOL ParseCmdLine(int argc, char **argv, char *PDBFile, 
-                     char *HBPlusFile, BOOL *relax, BOOL *all)
-   -----------------------------------------------------------
+                     char *HBPlusFile)
+   -------------------------------------------------------
    Parse the command line
 
    06.02.03 Original   By: ACRM
-   07.02.03 Added relax parameter (-r) and
-            Added all parameter (-a)
 */
-BOOL ParseCmdLine(int argc, char **argv, char *PDBFile, char *HBPlusFile,
-                  BOOL *relax, BOOL *all)
+BOOL ParseCmdLine(int argc, char **argv, char *PDBFile, char *HBPlusFile)
 {
-   *relax = FALSE;
-   *all   = FALSE;
-
    argc--;
    argv++;
    
@@ -208,12 +202,14 @@ BOOL ParseCmdLine(int argc, char **argv, char *PDBFile, char *HBPlusFile,
    {
       switch(argv[0][1])
       {
-      case 'a':
-         *all = TRUE;
-         break;
       case 'r':
-         *relax = TRUE;
+         gRelax = TRUE;
          break;
+      case 'o':
+         gHBOnly = TRUE;
+         break;
+      case 'h':
+         return(FALSE);
       default:
          return(FALSE);
       }
@@ -227,6 +223,7 @@ BOOL ParseCmdLine(int argc, char **argv, char *PDBFile, char *HBPlusFile,
    
    strcpy(PDBFile,argv[0]);
    strcpy(HBPlusFile,argv[1]);
+   
 
    return(TRUE);
 }
@@ -240,7 +237,6 @@ BOOL ParseCmdLine(int argc, char **argv, char *PDBFile, char *HBPlusFile,
 
    04.01.95 Original    By: ACRM  (from ehb.c)
    05.02.03 Modified to store residue ID and name as well
-   07.02.03 Added check for blank lines
 */
 int ReadHBonds(char *filename, HBONDS *HBonds)
 {
@@ -272,17 +268,14 @@ int ReadHBonds(char *filename, HBONDS *HBonds)
                  &(HBonds[NHBonds].AngHAAA),
                  &(HBonds[NHBonds].AngDAAA));
 
-         if(strncmp(HBonds[NHBonds].ResID_D, "      ", 6))
+         HBonds[NHBonds].AngDHA  *= PI / (REAL)180.0;
+         HBonds[NHBonds].AngHAAA *= PI / (REAL)180.0;
+         HBonds[NHBonds].AngDAAA *= PI / (REAL)180.0;
+         
+         if((++NHBonds) >= MAXHBOND)
          {
-            HBonds[NHBonds].AngDHA  *= PI / (REAL)180.0;
-            HBonds[NHBonds].AngHAAA *= PI / (REAL)180.0;
-            HBonds[NHBonds].AngDAAA *= PI / (REAL)180.0;
-            
-            if((++NHBonds) >= MAXHBOND)
-            {
-               fprintf(stderr,"Too many HBonds, Increase MAXHBONDS\n");
-               return(0);
-            }
+            fprintf(stderr,"Too many HBonds, Increase MAXHBONDS\n");
+            return(0);
          }
       }
 
@@ -294,32 +287,37 @@ int ReadHBonds(char *filename, HBONDS *HBonds)
 
 
 /************************************************************************/
-/*>BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds, int i, BOOL relax)
-   -----------------------------------------------------------------
+/*>BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds,  int i)
+   -----------------------------------------------------
    Given a PDB file with hydrogens (in Charmm format) and a list of
    HBonds, calculate the energy for one HBond
 
    06.02.03 Original   By: ACRM
-   07.02.03 Added relax parameter
 */
-BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds, int i, BOOL relax)
+BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds, int i)
 {
    FILE       *fp;
    char       chainA,  chainD,
               insertA, insertD,
               cmdline[MAXBUFF],
               PDBFilename[MAXBUFF],
-              ECFile[MAXBUFF],
-              EnergyFile[MAXBUFF];
+              EnergyFile[MAXBUFF],
+              *CONTROLfile;
+   
    int        resnumA, resnumD,
               natoms;
    REAL       energy;
    static PDB *pdb = NULL;
    PDB        *donor,
               *acceptor,
-              *p;
+              *p,
+              *acceptor_c,
+              *donor_c,
+              *acceptor_n,
+              *donor_n;
    
-
+   CONTROLfile = "control.dat";
+   
    /* If the PDB file hasn't been read in yet, then do so               */
    if(pdb == NULL)
    {
@@ -332,7 +330,7 @@ BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds, int i, BOOL relax)
             fclose(fp);
             return(FALSE);
          }
-         FixHydrogenAtomNames(pdb);
+/*         FixHydrogenAtomNames(pdb); */
          fclose(fp);
       }
       else
@@ -366,58 +364,86 @@ BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds, int i, BOOL relax)
       return(FALSE);
    }
 
-   /* Copy just these residues, add NTER and CTER and fix chain names   */
-   if((acceptor = CopyAndFixResidue(acceptor, 'A'))==NULL)
-      return(FALSE);
-   if((donor    = CopyAndFixResidue(donor, 'D'))==NULL)
-      return(FALSE);
+   /* 22.09.05 If the two residues are bonded, join them into one       */
+   acceptor_c = FindAtomInRes(acceptor, "C   ");
+   donor_c    = FindAtomInRes(donor,    "C   ");
+   acceptor_n = FindAtomInRes(acceptor, "N   ");
+   donor_n    = FindAtomInRes(donor,    "N   ");
+   if(DISTSQ(acceptor_c, donor_n) < CUTSQ)
+   {
+      if((acceptor = CopyResidue(acceptor, 'X'))==NULL)
+         return(FALSE);
+      if((donor = CopyResidue(donor, 'X'))==NULL)
+         return(FALSE);
+      
+      p = acceptor;
+      LAST(p);
+      p->next = donor;
+      acceptor = FixResidue(acceptor);
+      donor = NULL;
+   }
+   else if(DISTSQ(donor_c, acceptor_n) < CUTSQ)
+   {
+      if((acceptor = CopyResidue(acceptor, 'X'))==NULL)
+         return(FALSE);
+      if((donor = CopyResidue(donor, 'X'))==NULL)
+         return(FALSE);
+      
+      p = donor;
+      LAST(p);
+      p->next = acceptor;
+      donor = FixResidue(donor);
+      acceptor = NULL;
+   }
+   else
+   {
+      /* Copy just these residues, add NTER and CTER and fix chain names*/
+      if((acceptor = CopyAndFixResidue(acceptor, 'A'))==NULL)
+         return(FALSE);
+      if((donor    = CopyAndFixResidue(donor, 'D'))==NULL)
+         return(FALSE);
+   }
    
-   /* Now write temporary PDB file containing these residues            */
-   sprintf(PDBFilename, "/tmp/%d.pdh", (int)getpid());
-   sprintf(EnergyFile,  "/tmp/%d.ec",  (int)getpid());
+   /* Now write temporary PDB file containing just donor and acceptor 
+      residues 
+   */
+          
+   sprintf(PDBFilename, "%d.pdh", (int)getpid());
+   sprintf(EnergyFile,  "%d.ec",  (int)getpid());
+
+   /* Write PDBFilename and other options  to control file */
+   if((fp=fopen(CONTROLfile, "w"))!=NULL)
+   {    
+      fprintf(fp, "PDBFILE %s\n", PDBFilename);
+      fprintf(fp, "IGNTER\n");
+      if(gHBOnly)
+      {
+         fprintf(fp, "POTENTIAL\n");
+         fprintf(fp, "HBONDS\n");
+         fprintf(fp, "END\n");
+      }
+      else if(gRelax)
+      {
+         fprintf(fp, "RELAX\n");
+      }
+   }
+   fclose(fp);
+
+   /* Write donor/acceptor residues to temporary PDB file */
+
    if((fp=fopen(PDBFilename, "w"))!=NULL)
    {
       for(p=donor; p!=NULL; NEXT(p))
-         WritePDBRecord(fp, p);
+         WritePDBRecordAtnam(fp, p);
       for(p=acceptor; p!=NULL; NEXT(p))
-         WritePDBRecord(fp, p);
+         WritePDBRecordAtnam(fp, p);
       fclose(fp);
 
-      FREELIST(donor, PDB);
-      FREELIST(acceptor, PDB);
-
-      /* If we want to relax the structure we need to write a control
-         file for ECalc
-      */
-      if(relax)
-      {
-         sprintf(ECFile,  "/tmp/%d.ecalc",  (int)getpid());
-         if((fp=fopen(ECFile, "w"))!=NULL)
-         {
-            fprintf(fp,"PDBFILE %s\n", PDBFilename);
-            fprintf(fp,"RELAX\n");
-            fclose(fp);
-         }
-         else
-         {
-            unlink(PDBFilename);
-            unlink(EnergyFile);
-            fprintf(stderr,"Can't write ECalc control file\n");
-            return(FALSE);
-         }
-      }
-      
-
-      /* Call the ecalc program to calculate the energy                 */
-      if(relax)
-      {
-         sprintf(cmdline, "ecalc %s > %s\n", ECFile, EnergyFile);
-      }
-      else
-      {
-         sprintf(cmdline, "ecalc -p %s > %s\n", PDBFilename, EnergyFile);
-      }
-      system(cmdline);
+      /* Call the ecalc program to calculate the energy  */
+ 
+      sprintf(cmdline, "ecalc %s > %s\n", CONTROLfile, EnergyFile);
+       
+      system(cmdline); 
 
       /* Extract the energy from the output of ecalc                    */
       if((energy = ParseECalcOutput(EnergyFile))==(REAL)-99999.999)
@@ -426,7 +452,6 @@ BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds, int i, BOOL relax)
       /* Print the energy                                               */
       fprintf(stdout, "HBond %d Energy: %.6f\n", i+1, energy);
       
-      if(relax) unlink(ECFile);
       unlink(PDBFilename);
       unlink(EnergyFile);
    }
@@ -436,26 +461,26 @@ BOOL CalcEnergy(char *PDBFile, HBONDS *hbonds, int i, BOOL relax)
       return(FALSE);
    }
 
+   /* Free the copies of the residues                                   */
+   FREELIST(donor, PDB);
+   FREELIST(acceptor, PDB);
+
    return(TRUE);
 }
 
 /************************************************************************/
-/*>PDB *CopyAndFixResidue(PDB *pdb, char chain)
-   --------------------------------------------
-   Make a copy of the PDB linked list for a single residue and add
-   NTER and CTER residues to that. Fix the chain name for all to that
-   given.
+/*>PDB *CopyResidue(PDB *pdb, char chain)
+   --------------------------------------
+   Creates a copy of a residue
+   Returns a new linked list
 
-   Returns a new PDB linked list
-
-   06.02.03 Original   By: ACRM
+   22.09.05 Original   By: ACRM
 */
-PDB *CopyAndFixResidue(PDB *pdb, char chain)
+PDB *CopyResidue(PDB *pdb, char chain)
 {
-   PDB *end,
-       *res = NULL,
-       *p,
-       *r;
+   PDB *p, *r=NULL, 
+       *end, 
+       *res = NULL;
    
    /* Create a copy of the residue                                      */
    end = FindNextResidue(pdb);
@@ -482,10 +507,45 @@ PDB *CopyAndFixResidue(PDB *pdb, char chain)
       r->next = NULL;
    }
 
+   return(res);
+}
+
+/************************************************************************/
+/*>PDB *FixResidue(PDB *res)
+   -------------------------
+   Adds nter and cter residues and atoms
+   (Should test the called routines!)
+
+   22.09.05 Original   By: ACRM
+*/
+PDB *FixResidue(PDB *res)
+{
    /* Now add the NTER residue                                          */
    AddNTerHs(&res, TRUE); 
    /* Now add the CTER residue                                          */
    FixCterPDB(res, 2); 
+
+   return(res);
+}
+
+
+/************************************************************************/
+/*>PDB *CopyAndFixResidue(PDB *pdb, char chain)
+   --------------------------------------------
+   Make a copy of the PDB linked list for a single residue and add
+   NTER and CTER residues to that. Fix the chain name for all to that
+   given.
+
+   Returns a new PDB linked list
+
+   06.02.03 Original   By: ACRM
+*/
+PDB *CopyAndFixResidue(PDB *pdb, char chain)
+{
+   PDB *res = NULL;
+   
+   res = CopyResidue(pdb, chain);
+   res = FixResidue(res);
 
    return(res);
 }
@@ -509,6 +569,7 @@ void FixHydrogenAtomNames(PDB *pdb)
       {
          strcpy(p->atnam_raw, " ");
          strcat(p->atnam_raw, p->atnam);
+         p->atnam_raw[4] = '\0';
       }
    }
 }
