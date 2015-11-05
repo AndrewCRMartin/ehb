@@ -1,0 +1,439 @@
+/*************************************************************************
+
+   Program:    ehb
+   File:       ehb.c
+   
+   Version:    V1.0
+   Date:       04.01.95
+   Function:   Calculate the hydrogen bond energy from the output of
+               HBPlus
+   
+   Copyright:  (c) Dr. Andrew C. R. Martin 1995
+   Author:     Dr. Andrew C. R. Martin
+   Address:    Biomolecular Structure & Modelling Unit,
+               Department of Biochemistry & Molecular Biology,
+               University College,
+               Gower Street,
+               London.
+               WC1E 6BT.
+   Phone:      (Home) +44 (0)1372 275775
+               (Work) +44 (0)171 387 7050 X 3284
+   EMail:      INTERNET: martin@bsm.bioc.ucl.ac.uk
+               
+**************************************************************************
+
+   This program is not in the public domain, but it may be copied
+   according to the conditions laid out in the accompanying file
+   COPYING.DOC
+
+   The code may be modified as required, but any modifications must be
+   documented so that the person responsible can be identified. If someone
+   else breaks this code, I don't want to be blamed for code that does not
+   work! 
+
+   The code may not be sold commercially or included as part of a 
+   commercial product except as described in the file COPYING.DOC.
+
+**************************************************************************
+
+   Description:
+   ============
+   Simple program to calculate the hydrogen bond energy using a list
+   of HBonds as generated using the HBPlus program
+
+**************************************************************************
+
+   Usage:
+   ======
+   ehb pdbfile
+
+**************************************************************************
+
+   Revision History:
+   =================
+   V1.0   04.01.94 Original
+
+*************************************************************************/
+/* Includes
+*/
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "bioplib/SysDefs.h"
+#include "bioplib/MathType.h"
+#include "bioplib/angle.h"
+#include "bioplib/macros.h"
+#include "bioplib/general.h"
+#include "bioplib/fsscanf.h"
+
+/************************************************************************/
+/* Defines and macros
+*/
+#define MAXHBOND 10000
+#define MAXBUFF  160
+#define NSKIP    8  /* Number of header lines at start of HBPlus output */
+
+typedef struct
+{
+   REAL CutOnHB,
+        CutOffHB,
+        CutOnHBAng,
+        CutOffHBAng;
+}  EPARAMS;
+
+typedef struct
+{
+   char AtomD[8],
+        AtomA[8],
+        AtomH[8];
+   REAL DistDA,
+        AngDHA,
+        DistHA,
+        AngHAAA,
+        AngDAAA;
+}  HBONDS;
+
+/************************************************************************/
+/* Globals
+*/
+
+/************************************************************************/
+/* Prototypes
+*/
+int main(int argc, char **argv);
+int ReadHBonds(char *filename, HBONDS *HBonds);
+void SetDefaults(EPARAMS *eparams);
+REAL EHBond(HBONDS *hbonds, int NHBonds, EPARAMS *eparams);
+void Usage(void);
+BOOL ParseCmdLine(int argc, char **argv, char *filename);
+
+/************************************************************************/
+/*>int main(int argc, char **argv)
+   -------------------------------
+   Main program to calculate HBond energy
+
+   04.01.95 Original    By: ACRM
+*/
+int main(int argc, char **argv)
+{
+   EPARAMS eparams;
+   HBONDS  HBonds[MAXHBOND];
+   int     NHBonds;
+   REAL    HBondEnergy;
+   char    filename[MAXBUFF];
+
+   if(ParseCmdLine(argc, argv, filename))
+   {
+      SetDefaults(&eparams);
+      NHBonds      = ReadHBonds(filename, HBonds);
+      HBondEnergy  = EHBond(HBonds, NHBonds, &eparams);
+      
+      printf("HBond energy = %f\n",HBondEnergy);
+   }
+   else
+   {
+      Usage();
+   }
+
+   return(0);
+}
+
+/************************************************************************/
+/*>BOOL ParseCmdLine(int argc, char **argv, char *filename)
+   --------------------------------------------------------
+   Parse the command line.
+   A very simple version, but allows for future expansion.
+
+   04.01.95 Original    By; ACRM
+*/
+BOOL ParseCmdLine(int argc, char **argv, char *filename)
+{
+   argc--;
+   argv++;
+   
+   while(argc && argv[0][0] == '-')
+   {
+      switch(argv[0][1])
+      {
+      default:
+         return(FALSE);
+      }
+      
+      argc--;
+      argv++;
+   }
+   
+   if(argc != 1)
+      return(FALSE);
+   
+   strcpy(filename,argv[0]);
+
+   return(TRUE);
+}
+
+/************************************************************************/
+/*>void Usage(void)
+   ----------------
+   Prints a usage message
+
+   04.01.95 Original    By: ACRM
+*/
+void Usage(void)
+{
+   fprintf(stderr,"\nEHB V1.0 (c) 1995, Dr. Andrew C.R. Martin, UCL.\n");
+
+   fprintf(stderr,"\nUsage:  ehb file.hb2\n");
+
+   fprintf(stderr,"\nCalculates the hydrogen bond energy from the list \
+of hydrogen bonds\n");
+   fprintf(stderr,"generated by HBPlus. Parameters used are those from \
+Charmm and are\n");
+   fprintf(stderr,"hard-coded into the program.\n\n");
+}
+
+/************************************************************************/
+/*>int ReadHBonds(char *filename, HBONDS *HBonds)
+   ----------------------------------------------
+   Reads the HBond list from HBPlus output
+
+   04.01.95 Original    By: ACRM
+*/
+int ReadHBonds(char *filename, HBONDS *HBonds)
+{
+   FILE *fp     = NULL;
+   int  NHBonds = 0,
+        i;
+   char buffer[MAXBUFF];
+   
+   /* Open the file for reading                                         */
+   if((fp=fopen(filename,"r"))!=NULL)
+   {
+      /* Skip the first NSKIP lines                                     */
+      for(i=0; i<NSKIP; i++)
+         fgets(buffer,MAXBUFF,fp);
+
+      while(fgets(buffer,MAXBUFF,fp))
+      {
+         fsscanf(buffer,"%10x%3s%11x%3s%5lf%13x%6lf%1x%5lf%6lf%6lf",
+                 HBonds[NHBonds].AtomD,
+                 HBonds[NHBonds].AtomA,
+                 &(HBonds[NHBonds].DistDA),
+                 &(HBonds[NHBonds].AngDHA),
+                 &(HBonds[NHBonds].DistHA),
+                 &(HBonds[NHBonds].AngHAAA),
+                 &(HBonds[NHBonds].AngDAAA));
+
+         HBonds[NHBonds].AngDHA  *= PI / (REAL)180.0;
+         HBonds[NHBonds].AngHAAA *= PI / (REAL)180.0;
+         HBonds[NHBonds].AngDAAA *= PI / (REAL)180.0;
+         
+         if((++NHBonds) >= MAXHBOND)
+         {
+            fprintf(stderr,"Too many HBonds, Increase MAXHBONDS\n");
+            return(0);
+         }
+      }
+
+      fclose(fp);
+   }
+   
+   return(NHBonds);
+}
+
+
+/************************************************************************/
+/*>void SetDefaults(EPARAMS *eparams)
+   ----------------------------------
+   Sets default value for parameters.
+
+   04.01.95 Original    By: ACRM
+*/
+void SetDefaults(EPARAMS *eparams)
+{
+   eparams->CutOnHB         = 4.0;
+   eparams->CutOffHB        = 5.0;
+   eparams->CutOnHBAng      = 90.0 * PI / 180.0;
+   eparams->CutOffHBAng     = 90.0 * PI / 180.0;
+}
+
+
+/************************************************************************/
+/*>REAL EHBond(HBONDS *HBonds, int NHBonds, EPARAMS *eparams)
+   ----------------------------------------------------------
+   Calculates the HBond energy from the list of hydrogen bonds and
+   supplied parameters
+
+   04.01.95 Original   Based on code from ECalc    By: ACRM
+*/
+REAL EHBond(HBONDS *HBonds, int NHBonds, EPARAMS *eparams)
+{
+   REAL CutOnHBSq,
+        CutOffHBSq,
+        CutOnHBAngSq,
+        CutOffHBAngSq,
+        CosAng,
+        CosAngSq,
+        ETot,
+        EAng,
+        DistSq,
+        InvDistSq,
+        InvDist10,
+        energy,
+        ParamR10,
+        ParamR12,
+        Rul3,
+        Rul12,
+        Rua3,
+        Rua12,
+        RMin,
+        EMin;
+   int  i,
+        j;
+
+   ETot     = (REAL)0.0;
+
+   CutOnHBSq  = eparams->CutOnHB  * eparams->CutOnHB;
+   CutOffHBSq = eparams->CutOffHB * eparams->CutOffHB;
+
+   if(CutOffHBSq != CutOnHBSq)
+   {
+      Rul3  = (REAL)1.0/((CutOffHBSq - CutOnHBSq) * 
+                         (CutOffHBSq - CutOnHBSq) * 
+                         (CutOffHBSq - CutOnHBSq));
+      Rul12 = (REAL)12.0 * Rul3;
+   }
+   
+   CutOnHBAngSq   = cos(eparams->CutOnHBAng);
+   CutOnHBAngSq  *= CutOnHBAngSq;
+   CutOffHBAngSq  = cos(eparams->CutOffHBAng);
+   CutOffHBAngSq *= CutOffHBAngSq;
+
+   if(CutOffHBAngSq != CutOnHBAngSq)
+   {
+      Rua3  = (REAL)1.0/((CutOffHBAngSq - CutOnHBAngSq) * 
+                         (CutOffHBAngSq - CutOnHBAngSq) * 
+                         (CutOffHBAngSq - CutOnHBAngSq));
+      Rua12 = (REAL)12.0 * Rua3;
+   }
+
+   /* For each hydrogen bond                                            */
+   for(i=0; i<NHBonds; i++)
+   {
+      /* Check for -1 records in HBPlus output                          */
+      if(HBonds[i].DistHA >= 0.0)
+      {
+         DistSq = HBonds[i].DistDA * HBonds[i].DistDA;
+         
+         if(DistSq != (REAL)0.0)
+         {
+            /* If we're within the HBond cutoff, calculate energy       */
+            if(DistSq < CutOffHBSq)
+            {
+               InvDistSq = (REAL)1.0 / DistSq;
+               InvDist10 = InvDistSq * InvDistSq * InvDistSq * 
+                  InvDistSq * InvDistSq;
+               
+               /* Work out the parameters for this atom pair            
+                  Parameters are taken from Charmm/CONGEN
+               */
+               if((HBonds[i].AtomD[0] == 'N') &&
+                  (HBonds[i].AtomA[0] == 'N'))
+               {
+                  EMin = (REAL)(-3.0);
+                  RMin = (REAL)(3.0);
+               }
+               else if((HBonds[i].AtomD[0] == 'N') &&
+                       (HBonds[i].AtomA[0] == 'O'))
+               {
+                  EMin = (REAL)(-3.5);
+                  RMin = (REAL)(2.9);
+               }
+               else if((HBonds[i].AtomD[0] == 'O') &&
+                       (HBonds[i].AtomA[0] == 'N'))
+               {
+                  EMin = (REAL)(-4.0);
+                  RMin = (REAL)(2.85);
+               }
+               else if((HBonds[i].AtomD[0] == 'O') &&
+                       (HBonds[i].AtomA[0] == 'O'))
+               {
+                  EMin = (REAL)(-4.25);
+                  RMin = (REAL)(2.75);
+               }
+               else   /* This is a guess!                               */
+               {
+                  EMin = (REAL)(-3.0);
+                  RMin = (REAL)(3.0);
+               }
+
+               /* Convert EMin and RMin to the Param10 and Param12 
+                  values
+               */
+               ParamR10 = (EMin/(-(REAL)pow((double)5.0, (double)5.0)   /
+                                  (REAL)pow((double)6.0, (double)6.0))) *
+                          (REAL)pow((double)(RMin*RMin/(REAL)1.2),
+                                    (double)5.0);
+               ParamR12 = ParamR10 * RMin * RMin / (REAL)1.2;
+
+               energy = (ParamR12 * InvDistSq * InvDist10) - 
+                  (ParamR10 * InvDist10);
+               
+               /* If we're above the start of the smoothing range, 
+                  calculate the smoothing factor.
+               */
+               if(DistSq > CutOnHBSq)
+               {
+                  REAL DistFromOn,
+                       DistFromOff,
+                       Smoothing;
+                  
+                  DistFromOn  = CutOnHBSq  - DistSq;
+                  DistFromOff = CutOffHBSq - DistSq;
+                  
+                  Smoothing = DistFromOff * DistFromOff * Rul3 *
+                     (DistFromOff - (REAL)3.0 * DistFromOn);
+                  
+                  energy *= Smoothing;
+               }
+               
+               /* Calculate the angle contribution                      */
+               CosAng = (REAL)cos((double)HBonds[i].AngDHA);
+               if(CosAng <= (REAL)(-0.99999))
+                  CosAng = (REAL)(-0.99999);
+               
+               if(CosAng <= 0.0)
+               {
+                  CosAngSq = CosAng * CosAng;
+                  if(CosAngSq > CutOffHBAngSq)
+                  {
+                     EAng = CosAngSq * CosAngSq;
+                     
+                     if(CosAngSq < CutOnHBAngSq)
+                     {
+                        REAL AngFromOn,
+                             AngFromOff,
+                             Smoothing;
+                        
+                        AngFromOn  = CutOnHBAngSq  - CosAngSq;
+                        AngFromOff = CutOffHBAngSq - CosAngSq;
+                        Smoothing  = AngFromOff * AngFromOff * 
+                           Rua3 *
+                              (AngFromOff - (REAL)3.0 * AngFromOn);
+                        
+                        EAng *= Smoothing;
+                     }
+                     
+                     /* Add onto the total energy                       */
+                     ETot += (EAng * energy);
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   return(ETot);
+}
+
+
